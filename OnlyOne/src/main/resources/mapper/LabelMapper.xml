@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.onlyone.Mapper.LabelMapper">
+
+
+    <select id="selectLabelList" resultType="com.example.onlyone.Entity.Label">
+        select id ,name
+        from label
+        where id in
+        <foreach collection="labelIdList" item="labelId" open="(" close=")" separator=",">
+            #{labelId}
+        </foreach>
+    </select>
+</mapper>

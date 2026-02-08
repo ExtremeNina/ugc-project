@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.onlyone.Mapper.PermissionMapper">
+
+
+    <select id="selectAllPermission" resultType="com.example.onlyone.Entity.Permission">
+        select id ,name ,display_name ,description ,category ,module
+        from permission
+        where id in
+        <foreach collection="permissionIds" item="permissionId" open="(" close=")" separator=",">
+            #{permissionId}
+        </foreach>
+    </select>
+
+
+</mapper>

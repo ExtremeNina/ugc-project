@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.onlyone.Mapper.ArticleMapper">
+
+
+    <select id="selectArticlesByStatuses" resultType="com.example.onlyone.Entity.Article">
+        <!-- 查询多种状态的文章（不限用户） -->
+            SELECT * FROM article
+            WHERE status IN
+            <foreach item="status" collection="statuses" open="(" separator="," close=")">
+                #{status}
+            </foreach>
+            ORDER BY
+            CASE
+                WHEN status = 2 THEN 1  <!-- 待审核优先显示 -->
+                WHEN status = 3 THEN 2  <!-- 已发布其次 -->
+            ELSE 3
+            END,
+            create_time DESC
+        </select>
+
+
+    <select id="BatchArticles" resultType="com.example.onlyone.Entity.Article">
+            select * from article where
+            id in
+            <foreach item="id" collection="articleIds" open="(" separator="," close=")">
+                #{id}
+            </foreach>
+            order by create_time asc
+    </select>
+
+</mapper>

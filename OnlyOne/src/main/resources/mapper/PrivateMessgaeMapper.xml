@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.onlyone.Mapper.PrivateMessageMapper">
+
+
+    <select id="selectByCurrent" resultType="com.example.onlyone.Entity.PrivateMessage">
+        select * from private_message
+        where (user_id = #{userId} and receive_id = #{id}) or (user_id = #{id} and receive_id = #{userId})
+        order by date_time asc
+    </select>
+
+
+    <select id="getLastText" resultType="com.example.onlyone.Entity.PrivateMessage">
+        select * from private_message
+        where (user_id = #{userId} and receive_id = #{id}) or (user_id = #{id} and receive_id = #{userId})
+        order by date_time desc limit 1
+    </select>
+</mapper>

@@ -26,14 +26,7 @@
 
 ## 📋 项目概述
 
-**BlueBook** 是一个功能完整的仿小红书风格社区平台，采用前后端分离架构。系统围绕 **5 大核心业务** 构建：Spring Security 双 Token 认证、AI 智能审核、Feed 流设计、私信系统、轻量级推荐系统，提供从内容创作到用户交互的完整社区解决方案。
-
-| 模块 | 目录 | 端口 | 说明 |
-|---|---|---|---|
-| 后端服务 | `backend/` | 8081 | Spring Boot 3.5 REST API |
-| 用户端前端 | `hongshu-web/` | 5173 | Vue 3 + Element Plus 仿小红书 UI |
-| 管理端前端 | `frontend/` | — | Vue 3 + Tailwind CSS 后台管理 |
-
+**SweetTato** 是一个功能完整的仿小红书风格社区平台，基于 Spring Boot3 + vue3 构建前后端分离架构的仿小红书轻社交UGC社区，提供从内容创作到用户交互的完整社区解决方案。
 ---
 
 ## 🏛️ 系统架构
@@ -423,50 +416,6 @@ npm install
 # 开发模式启动
 npm run dev
 ```
-
----
-
-## 📡 API 接口概览
-
-### 用户端 (`/api/`)
-
-| 模块 | 路径前缀 | 主要接口 |
-|---|---|---|
-| 认证 | `/api/auth` | 登录/注册/登出/验证码/QQ邮箱/Token刷新 |
-| 文章 | `/api/articles` | 文章详情 |
-| 评论 | `/api/comment` | 发布评论/评论列表/用户资料 |
-| 创作中心 | `/api/create-center` | 发布笔记/草稿/图片上传/分类/标签 |
-| 社区首页 | `/api/community` | 瀑布流笔记列表 |
-| 动态 | `/api/dynamic` | 关注动态 Feed 流 |
-| 关注 | `/api/Interaction/follow` | 关注/取关/粉丝列表 |
-| 点赞 | `/api/Interaction/love` | 点赞/取消点赞/收藏 |
-| 私信 | `/api/private` | 好友列表/聊天记录 |
-| 搜索 | `/api/search` | 关键词搜索/历史记录 |
-| 推荐 | `/api/recommend` | 个性化推荐 Feed |
-| 用户 | `/api/users` | 用户资料/修改信息 |
-| OAuth | `/api/oauth` | GitHub 登录回调 |
-
-### 系统管理端 (`/sys/`)
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/sys/review/pending` | 分页查询待审核列表 |
-| POST | `/sys/review/approve` | 审核通过 |
-| POST | `/sys/review/reject` | 审核驳回 |
-| GET | `/sys/sensitive-word/list` | 敏感词列表 |
-| POST | `/sys/sensitive-word/add` | 添加敏感词 (热重载) |
-| POST | `/sys/sensitive-word/delete` | 删除敏感词 (热重载) |
-| POST | `/sys/sensitive-word/reload` | 手动重载敏感词库 |
-
-### 管理端 (`/admin/`、`/api/admin/`)
-
-| 模块 | 路径前缀 | 说明 |
-|---|---|---|
-| 管理端认证 | `/admin` | 管理员登录 |
-| 用户管理 | `/admin/user` | 用户列表/禁用 |
-| 文章管理 | `/api/admin/articles` | 文章列表/状态管理 |
-
-> 详细接口文档见 `backend/接口文档_详细.md`
 
 ---
 

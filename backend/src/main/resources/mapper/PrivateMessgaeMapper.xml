@@ -2,17 +2,28 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.example.onlyone.Mapper.PrivateMessageMapper">
 
-
-    <select id="selectByCurrent" resultType="com.example.onlyone.Entity.PrivateMessage">
-        select * from private_message
-        where (user_id = #{userId} and receive_id = #{id}) or (user_id = #{id} and receive_id = #{userId})
-        order by date_time asc
+    <!--
+        批量查询：我与每个好友的会话中各自最新的一条消息
+        用窗口函数按"会话对"（least/greatest 把两人 id 归一化成无序对）分区，取 rn=1
+        一条 SQL 替代原来 N 个好友的 N 次 getLastText 查询
+        这是全项目唯一保留的自定义 SQL：窗口函数无法用 MP lambda 表达
+    -->
+    <select id="selectLastMessagePerPeer" resultType="com.example.onlyone.Entity.PrivateMessage">
+        select * from (
+            select pm.*,
+                   row_number() over (
+                       partition by least(pm.user_id, pm.receive_id), greatest(pm.user_id, pm.receive_id)
+                       order by pm.date_time desc, pm.id desc
+                   ) as rn
+            from private_message pm
+            where pm.user_id = #{userId} or pm.receive_id = #{userId}
+        ) t
+        where t.rn = 1
+        and (t.user_id in
+        <foreach collection="peerIds" item="peerId" open="(" separator="," close=")">#{peerId}</foreach>
+        or t.receive_id in
+        <foreach collection="peerIds" item="peerId" open="(" separator="," close=")">#{peerId}</foreach>
+        )
     </select>
 
-
-    <select id="getLastText" resultType="com.example.onlyone.Entity.PrivateMessage">
-        select * from private_message
-        where (user_id = #{userId} and receive_id = #{id}) or (user_id = #{id} and receive_id = #{userId})
-        order by date_time desc limit 1
-    </select>
 </mapper>

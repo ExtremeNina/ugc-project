@@ -23,16 +23,32 @@ public class ExceptionHandlingFilter extends OncePerRequestFilter {
             log.error("=== Global Filter Chain Exception ===");
             log.error("URL: {} {}", request.getMethod(), request.getRequestURI());
             log.error("Exception: ", e);
-            // 可以返回统一的错误响应
             handleException(response, e);
+        } catch (Throwable t) {
+            log.error("=== Global Filter Chain Error ===");
+            log.error("URL: {} {}", request.getMethod(), request.getRequestURI());
+            log.error("Error: ", t);
+            handleError(response, t);
         }
     }
 
     private void handleException(HttpServletResponse response, Exception e) throws IOException {
-        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-        response.setContentType("application/json");
-        String errorMessage = "{\"error\": \"Internal Server Error\", \"message\": \"" + e.getMessage() + "\"}";
-        response.getWriter().write(errorMessage);
+        writeErrorResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+
+    private void handleError(HttpServletResponse response, Throwable t) throws IOException {
+        writeErrorResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                "服务器内部错误，请稍后重试");
+    }
+
+    private void writeErrorResponse(HttpServletResponse response, int status, String message) throws IOException {
+        if (response.isCommitted()) {
+            return;
+        }
+        response.setStatus(status);
+        response.setContentType("application/json;charset=UTF-8");
+        String errorJson = "{\"code\":" + status + ",\"msg\":\"" + message + "\",\"data\":null}";
+        response.getWriter().write(errorJson);
     }
 
 }

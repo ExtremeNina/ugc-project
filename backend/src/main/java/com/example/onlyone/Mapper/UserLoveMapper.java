@@ -6,6 +6,8 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.util.List;
+
 /**
  * 用户点赞 Mapper
  *
@@ -27,4 +29,17 @@ public interface UserLoveMapper extends BaseMapper<UserLove> {
 
     @Select("select COUNT(*) from follow where following_id = #{userId}")
     Long selectByUserId(Long userId);
+
+    /**
+     * 批量查询：用户在这些实体中已点赞（status=1）的实体 id 集合
+     * 用于 Feed 流组装 VO 时替代"逐篇单查"，一条 SQL 搞定整页点赞状态
+     */
+    @Select("<script>" +
+            "select entity_id from user_love where user_id = #{userId} and love_type_id = #{loveTypeId} and status = 1 " +
+            "and entity_id in " +
+            "<foreach collection='entityIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>" +
+            "</script>")
+    List<Long> selectLovedEntityIds(@Param("userId") Long userId,
+                                    @Param("loveTypeId") Long loveTypeId,
+                                    @Param("entityIds") List<Long> entityIds);
 }

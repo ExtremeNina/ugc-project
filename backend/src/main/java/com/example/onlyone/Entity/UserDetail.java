@@ -1,37 +1,40 @@
 package com.example.onlyone.Entity;
 
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.oauth2.core.user.OAuth2User;
 
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 
-@Data
+/**
+ * Spring Security UserDetails 实现
+ *
+ * 注意：不使用 @Data，因为 Lombok 生成的 equals()/hashCode()/toString()
+ * 会包含 passwordEncoder 字段和 User 对象（含密码），
+ * 这会导致 Spring Security 认证/授权过程中的对象比较异常（403）。
+ */
+@Getter
+@Setter
 @NoArgsConstructor
 public class UserDetail implements UserDetails {
 
-
     private User user;
-
     private PasswordEncoder passwordEncoder;
-    List<GrantedAuthority> authorities;
+    private List<GrantedAuthority> authorities;
 
-
-    public UserDetail(User user,PasswordEncoder passwordEncoder,List<GrantedAuthority> authorities) {
+    public UserDetail(User user, PasswordEncoder passwordEncoder, List<GrantedAuthority> authorities) {
         this.user = user;
         this.passwordEncoder = passwordEncoder;
         this.authorities = authorities;
     }
-    // 添加获取userId的方法
+
     public Long getUserId() {
         return user.getId();
     }
-
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
@@ -48,22 +51,23 @@ public class UserDetail implements UserDetails {
         return user.getUsername();
     }
 
-
-    // 建议实现剩余方法，避免潜在问题
     @Override
     public boolean isAccountNonExpired() {
-        return true; // 根据业务需求实现
+        return true;
     }
 
     @Override
     public boolean isAccountNonLocked() {
-        return true; // 根据业务需求实现
+        return true;
     }
 
     @Override
     public boolean isCredentialsNonExpired() {
-        return true; // 根据业务需求实现
+        return true;
     }
 
-
+    @Override
+    public boolean isEnabled() {
+        return user.getStatus() == 1;
+    }
 }

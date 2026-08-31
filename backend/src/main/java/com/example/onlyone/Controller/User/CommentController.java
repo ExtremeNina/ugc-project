@@ -42,7 +42,7 @@ public class CommentController {
     @GetMapping("/{articleId}")
     private Result<PageInfo<CommentVO>> getCommentList(@PathVariable Long articleId) {
         PageInfo<CommentVO> commentVOList = commentService.getCommentList(articleId);
-        log.info("当前文章的评论列表: {}", commentVOList);
+        log.info("当前文章的评论数: {}", commentVOList != null ? commentVOList.getTotal() : 0);
         return Result.success(commentVOList);
 
     }

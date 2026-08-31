@@ -1,7 +1,9 @@
 package com.example.onlyone.Service.ServiceImpl;
 
 import com.example.onlyone.Entity.Article;
+import com.example.onlyone.Entity.PrivateMessage;
 import com.example.onlyone.Entity.User;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.onlyone.Mapper.ArticleMapper;
 import com.example.onlyone.Mapper.CategoryMapper;
 import com.example.onlyone.Mapper.PrivateMessageMapper;
@@ -79,14 +81,12 @@ public class CommunityServiceImpl implements CommunityService {
     }
 
 
-    //获取该用户未读消息数
+    //获取该用户未读消息数（MP lambda 查询：替代手写 @Select，列名由方法引用保证类型安全）
     @Override
     public Long getUnreadCount(Long userId) {
-        Long count = privateMessageMapper.selectUnreadCount(userId);
-        if (count == null) {
-            return null;
-        }
-        return count;
+        return privateMessageMapper.selectCount(new LambdaQueryWrapper<PrivateMessage>()
+                .eq(PrivateMessage::getReceiveId, userId)
+                .eq(PrivateMessage::getStatus, 0L));
     }
 
 

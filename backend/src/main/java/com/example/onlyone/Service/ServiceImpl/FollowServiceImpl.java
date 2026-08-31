@@ -1,5 +1,6 @@
 package com.example.onlyone.Service.ServiceImpl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.onlyone.Entity.Follow;
 import com.example.onlyone.Entity.UserDetail;
 import com.example.onlyone.Exception.BusinessException;
@@ -248,7 +249,9 @@ public class FollowServiceImpl implements FollowService {
                     .collect(Collectors.toList());
         }
 
-        List<Follow> followList = followMapper.selectByFollowingId(userId);
+        // MP lambda 查询（替代手写 @Select）：列名由方法引用保证类型安全
+        List<Follow> followList = followMapper.selectList(new LambdaQueryWrapper<Follow>()
+                .eq(Follow::getFollowingId, userId));
         List<Long> followerIds = followList.stream().map(Follow::getFollowerId).toList();
 
         if (!followerIds.isEmpty()) {

@@ -25,6 +25,7 @@ import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -57,6 +58,8 @@ public class LoginServiceImpl implements LoginService {
     private MailSender mailSender;
     @Resource
     private JwtProperties jwtProperties;
+    @Resource
+    private PasswordEncoder passwordEncoder;
 
     private ExecutorService loginRecordThreadPool;
 
@@ -238,7 +241,7 @@ public class LoginServiceImpl implements LoginService {
         stringRedisTemplate.delete(key);
         User user = new User();
         user.setUsername(registerDTO.getUsername());
-        user.setPassword(registerDTO.getOnePassword());
+        user.setPassword(passwordEncoder.encode(registerDTO.getOnePassword()));
         user.setCreateTime(LocalDateTime.now());
         user.setUpdateTime(LocalDateTime.now());
         user.setStatus(1);
@@ -300,7 +303,7 @@ public class LoginServiceImpl implements LoginService {
             message.setText("您的验证码是：" + code);
             mailSender.send(message);
 
-            String key = "QQlogin:code" + email;
+            String key = "QQlogin:codeL" + email;
             stringRedisTemplate.opsForValue().set(key, code, 5, TimeUnit.MINUTES);
             log.info("发送邮箱验证码成功");
             return true;

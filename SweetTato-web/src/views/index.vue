@@ -440,15 +440,27 @@ const loadPad = () => {
 
 const maxRetries = 5; // 最大重试次数
 let retryCount = 0; // 当前重试次数
+let heartbeatTimer: any = null; // 心跳定时器：保持在线租约，防止代理空闲断连
+
+const HEARTBEAT_INTERVAL = 30 * 1000; // 30s 一次心跳（服务端租约 TTL 60s，超时未续期自动下线）
 
 const connectWs = (token: string) => {
   ws.value = new WebSocket(wsKey + "?token=" + token);
   ws.value.onopen = () => {
     console.log("连接成功");
     retryCount = 0; // 重置重试计数
+    // 启动心跳：每 30s 发送一次，服务端据此续期在线状态（user:online:{userId} 的 TTL）
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      if (ws.value && ws.value.readyState === WebSocket.OPEN) {
+        ws.value.send(JSON.stringify({ type: "heartbeat" }));
+      }
+    }, HEARTBEAT_INTERVAL);
   };
   ws.value.onclose = () => {
     console.log("连接断开");
+    // 停止心跳：断开后服务端会删除在线租约；若进程异常没删，60s 后 TTL 自动过期
+    clearInterval(heartbeatTimer);
     if (userInfo.value != null && userInfo.value != undefined) {
       if (retryCount < maxRetries) {
         retryCount++;
@@ -463,6 +475,12 @@ const connectWs = (token: string) => {
   ws.value.onmessage = (e: any) => {
     const message = JSON.parse(e.data);
     console.log("收到消息", message);
+
+    // 服务端消息回执（msg_ack）：目前仅记录，后续可做"发送中/失败/重发"状态
+    if (message.type === "msg_ack") {
+      console.log("消息投递回执", message.msgId, message.success);
+      return;
+    }
 
     if (message.type === "moderation_result") {
       handleModerationResult(message);

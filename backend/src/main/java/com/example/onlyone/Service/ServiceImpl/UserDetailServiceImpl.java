@@ -7,6 +7,7 @@ import com.example.onlyone.Entity.*;
 import com.example.onlyone.Mapper.*;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -45,8 +46,6 @@ public class UserDetailServiceImpl implements UserDetailsService {
     @Resource
     private UserMapper userMapper;
     @Resource
-    private PasswordEncoder passwordEncoder;
-    @Resource
     private UserAndRoleMapper userAndRoleMapper;
     @Resource
     private RoleAndPermissionMapper roleAndPermissionMapper;
@@ -56,6 +55,8 @@ public class UserDetailServiceImpl implements UserDetailsService {
     private PermissionMapper permissionMapper;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Autowired
+    private PasswordEncoder passwordEncoder;
 
     /**
      * 根据用户名加载用户详情及权限

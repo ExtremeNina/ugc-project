@@ -19,14 +19,4 @@
             create_time DESC
         </select>
 
-
-    <select id="BatchArticles" resultType="com.example.onlyone.Entity.Article">
-            select * from article where
-            id in
-            <foreach item="id" collection="articleIds" open="(" separator="," close=")">
-                #{id}
-            </foreach>
-            order by create_time asc
-    </select>
-
 </mapper>

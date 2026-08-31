@@ -12,169 +12,325 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 私信 WebSocket 处理器
+ *
+ * 本类包含的正确性改造（对应优化路线第一批、第二批）：
+ *  1. 先落库、后发送：消息以数据库为准，insert 拿到 msgId 后再推送 + 回 ACK，
+ *     杜绝"对方看到了、记录却没有"的不一致；
+ *  2. 移除失效的 @Transactional（self-invocation 不走代理，且事务不应包裹 WebSocket IO）；
+ *  3. 在线判断统一以本地 session 为准，彻底消除"Redis 说在线但 session 为空"的 NPE；
+ *  4. 多端登录：新连接顶掉旧连接前先 close 旧连接，避免死连接泄漏；
+ *     所有 session 用 ConcurrentWebSocketSessionDecorator 包装，防止并发写抛异常；
+ *  5. 在线状态改为"心跳租约"：per-user key 带 60s TTL，客户端 30s 心跳续期，
+ *     服务器崩溃后 60s 自动转为离线，无需人工清理（自愈）；
+ *  6. 未读数 hash 不再设置 7 天过期——未读数随消息生命周期管理，不随时间丢失；
+ *  7. 发送方头像在连接建立时查一次并缓存进 session attributes，
+ *     每条消息不再单独 selectById 查用户表。
+ */
 @Component
 @Slf4j
 public class ForumWebSocketHandler extends TextWebSocketHandler {
 
     private final StringRedisTemplate stringRedisTemplate;
 
+    /** 用户 id -> 该用户的 WebSocket 会话（经并发安全包装） */
     private static final ConcurrentHashMap<Long, WebSocketSession> userSessions = new ConcurrentHashMap<>();
+
+    /** 在线状态 Key 前缀：每个用户独立 key，靠 TTL 自愈（旧方案是共享 Set，崩溃后残留） */
+    public static final String ONLINE_KEY_PREFIX = "user:online:";
+    /** 在线租约时长：客户端每 30s 心跳一次，60s 内没续期即视为离线 */
+    private static final long ONLINE_TTL_SECONDS = 60;
+
+    /** 客户端心跳消息类型（前端 index.vue 每 30s 发送 {type:"heartbeat"}） */
+    private static final String TYPE_HEARTBEAT = "heartbeat";
+    /** 服务端回给发送方的消息回执类型（前端可据此做"发送中/失败/重发"） */
+    private static final String TYPE_MSG_ACK = "msg_ack";
+
+    /** 并发写保护参数：单条消息发送最长阻塞 2s，缓冲区上限 512KB，超限断开该连接 */
+    private static final int SEND_TIME_LIMIT_MS = 2000;
+    private static final int SEND_BUFFER_SIZE_LIMIT = 512 * 1024;
 
     public ForumWebSocketHandler(StringRedisTemplate stringRedisTemplate) {
         this.stringRedisTemplate = stringRedisTemplate;
     }
+
+    // ==================================================================================
+    // 连接生命周期
+    // ==================================================================================
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
 
         String username = (String) session.getAttributes().get("username");
         Long userId = (Long) session.getAttributes().get("userId");
-        if (username != null) {
-            userSessions.put(userId, session);
-            updateOnlineStatus(userId, true);
-            pushOfflineNotifications(userId);
-            log.info("用户 {} (ID:{}) 建立WebSocket连接", username, userId);
-        }else {
-            log.info("用户 {} (ID:{}) 建立WebSocket连接异常", username, userId);
-        }
-    }
-
-
-    @Override
-    @Transactional
-    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
-
-        ObjectMapper objectMapper = SpringContextUtils.getBean(ObjectMapper.class);
-
-        //将json格式的消息转换成java对象
-        PrivateDTO privateDTO = objectMapper.readValue(message.getPayload(), PrivateDTO.class);
-        log.info("发送的私信为:{}", privateDTO);
-
-        Long userId = (Long) session.getAttributes().get("userId");
-        //根据type进行判断离开页面请求
-        if (Objects.equals(privateDTO.getType(), "leave_chat")) {
-            log.info("离开聊天页面");
+        if (username == null || userId == null) {
+            // 握手时未通过鉴权，直接关闭，不进入会话表
+            log.warn("未鉴权的 WebSocket 连接被拒绝");
+            session.close();
             return;
         }
 
-        //构建消息并保存到数据库
+        // ---- 多端登录处理：同一用户新连接顶掉旧连接，必须先关闭旧连接，防止死连接泄漏 ----
+        WebSocketSession oldSession = userSessions.put(userId, wrapConcurrent(session));
+        if (oldSession != null && oldSession.isOpen()) {
+            log.info("用户 {} (ID:{}) 在新端登录，关闭旧连接", username, userId);
+            try {
+                oldSession.close(CloseStatus.POLICY_VIOLATION);
+            } catch (Exception e) {
+                log.warn("关闭旧连接失败, userId={}", userId, e);
+            }
+        }
+
+        // ---- 在线租约：SET key EX 60，之后靠心跳续期（见 handleTextMessage 的 heartbeat 分支） ----
+        markOnline(userId);
+
+        // ---- 头像缓存：连接建立时查一次用户信息存进 attributes，之后每条消息直接取，不再查库 ----
+        cacheUserInfo(session, userId);
+
+        // 补推离线期间积压的审核结果等通知
+        pushOfflineNotifications(userId);
+
+        log.info("用户 {} (ID:{}) 建立WebSocket连接", username, userId);
+    }
+
+    @Override
+    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+
+        Long userId = (Long) session.getAttributes().get("userId");
+        if (userId == null) {
+            return;
+        }
+
+        // 只有"当前登记的连接"是自己时才清理，防止新端登录后旧连接的 close 事件误删新端状态
+        if (userSessions.get(userId) == session) {
+            userSessions.remove(userId);
+            // 正常断开：立刻删除在线租约（若进程是崩溃状态，key 会在 60s 后自动过期，同样自愈）
+            stringRedisTemplate.delete(ONLINE_KEY_PREFIX + userId);
+            // 清除"正在和谁聊天"状态
+            stringRedisTemplate.delete("current:chat:" + userId);
+            log.info("用户 ID:{} 断开连接", userId);
+        }
+    }
+
+    // ==================================================================================
+    // 消息处理（先落库，后发送）
+    // ==================================================================================
+
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+
+        ObjectMapper objectMapper = SpringContextUtils.getBean(ObjectMapper.class);
+        // 将 json 格式的消息转换成 java 对象（解析失败直接丢弃，不影响连接）
+        PrivateDTO privateDTO;
+        try {
+            privateDTO = objectMapper.readValue(message.getPayload(), PrivateDTO.class);
+        } catch (Exception e) {
+            log.warn("无法解析的 WebSocket 消息，已丢弃: {}", message.getPayload());
+            return;
+        }
+
+        Long userId = (Long) session.getAttributes().get("userId");
+
+        // ---- 心跳：只续租，不落库不转发。客户端 30s 一次，60s 没续期即自动下线 ----
+        if (TYPE_HEARTBEAT.equals(privateDTO.getType())) {
+            renewOnlineLease(userId);
+            return;
+        }
+
+        // 根据type进行判断离开页面请求（清除"正在和谁聊天"状态，对方再来消息将累计未读数）
+        if (Objects.equals(privateDTO.getType(), "leave_chat")) {
+            log.info("离开聊天页面");
+            stringRedisTemplate.delete("current:chat:" + userId);
+            return;
+        }
+
+        // 基础校验：必须有接收人和内容
+        if (privateDTO.getReceiveId() == null || privateDTO.getContent() == null
+                || privateDTO.getContent().isBlank()) {
+            log.warn("非法的私信消息（缺少接收人或内容），已丢弃, userId={}", userId);
+            return;
+        }
+
+        // ---- 1. 先确定状态再落库：消息以数据库为准 ----
         PrivateMessage privateMessage = new PrivateMessage();
         privateMessage.setUserId(userId);
         privateMessage.setContent(privateDTO.getContent());
         privateMessage.setDateTime(LocalDateTime.now());
         privateMessage.setReceiveId(privateDTO.getReceiveId());
+        // 接收方正在当前聊天页 => 直接置为已读，否则为未读
+        boolean receiverOnChatPage = isReceiverOnChatPage(privateDTO.getReceiveId(), userId);
+        privateMessage.setStatus(receiverOnChatPage ? 1L : 0L);
 
-        sendMessageToUser(privateMessage);
-
-    }
-
-
-    @Override
-    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
-
-        Long userId = (Long) session.getAttributes().get("userId");
-
-        if (userId != null) {
-            //移除在线状态
-            userSessions.remove(userId);
-            updateOnlineStatus(userId, false);
-
-            //移除私聊状态
-            String key = "current:chat:"+userId;
-            stringRedisTemplate.delete(key);
-
-            log.info("用户 ID:{} 断开连接", userId);
-        }
-    }
-
-
-
-    private void updateOnlineStatus(Long userId,Boolean isOnline) {
-        String key = "user:online";
-        if (isOnline) {
-            stringRedisTemplate.opsForSet().add(key, userId.toString());
-        }else {
-            stringRedisTemplate.opsForSet().remove(key, userId.toString());
-        }
-    }
-
-    //向好友发送私信
-    public void sendMessageToUser(PrivateMessage privateMessage) throws IOException {
-
-
-        ObjectMapper objectMapper = SpringContextUtils.getBean(ObjectMapper.class);
-        UserMapper userMapper = SpringContextUtils.getBean(UserMapper.class);
+        // ---- 2. 落库（insert 后 MyBatis-Plus 会回填自增 id）----
+        // 落库失败直接抛异常结束：此时谁也没收到消息，发送方前端可提示重发，不会出现"单边可见"
         PrivateMessageMapper privateMessageMapper = SpringContextUtils.getBean(PrivateMessageMapper.class);
-
-        //获取基本信息
-        Long receiveId = privateMessage.getReceiveId();
-        WebSocketSession receiveSession = userSessions.get(receiveId);
-
-        //判断好友是否在线
-            if (Boolean.TRUE.equals(stringRedisTemplate.opsForSet().isMember("user:online", receiveId.toString()))
-            || receiveSession != null) {
-
-
-            //构建返回对象
-            //Long userId = (Long) receiveSession.getAttributes().get("userId");
-            Long userId = privateMessage.getUserId();
-            User user = userMapper.selectById(userId);
-            String icon = user.getIcon();
-
-            //提前new出来，获取未读消息数
-            PrivateMessageVO privateMessageVO = new PrivateMessageVO();
-
-            String key = "current:chat:"+ receiveId;
-            //证明对方正在当前的聊天页面
-            if (Objects.equals(stringRedisTemplate.opsForValue().get(key), userId.toString())) {
-                privateMessage.setStatus(1L);
-                privateMessageVO.setNotReadCount(0L);
-            }else {
-                //不在则设置为未读
-                privateMessage.setStatus(0L);
-                //记录当前聊天页面的未读数
-                String unreadHashKey = "unread:hash:" + receiveId;
-                Long notReadCount = stringRedisTemplate.opsForHash()
-                        .increment(unreadHashKey, privateMessage.getUserId().toString(), 1L);
-                //设置过期时间
-                stringRedisTemplate.expire(unreadHashKey, 7, TimeUnit.DAYS);
-                //设置未读消息数
-                privateMessageVO.setNotReadCount(notReadCount);
-            }
-
-            privateMessageVO.setContent(privateMessage.getContent());
-            privateMessageVO.setSenderId(privateMessage.getUserId());
-            privateMessageVO.setIcon(icon);
-            privateMessageVO.setDateTime(privateMessage.getDateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-
-            //把java对象转换出json格式
-            String message =  objectMapper.writeValueAsString(privateMessageVO);
-            log.info("发送方的信息:{}",privateMessageVO);
-            //发送消息
-            receiveSession.sendMessage(new TextMessage(message));
-            log.info("发送成功");
-        }else {
-            log.info("当前用户不在线");
-            //设置为未读
-            privateMessage.setStatus(0L);
+        try {
+            privateMessageMapper.insert(privateMessage);
+        } catch (Exception e) {
+            log.error("私信落库失败，消息未投递, sender={}, receiver={}", userId, privateDTO.getReceiveId(), e);
+            sendAck(session, privateMessage, false);
+            return;
         }
-        //将消息保存到数据库
-        privateMessageMapper.insert(privateMessage);
+
+        // ---- 3. 落库成功后再投递 + 接收方未读数累计 ----
+        // 发送方头像从发送方自己的 session attributes 取（连接时已缓存），避免每条消息查库
+        String senderIcon = (String) session.getAttributes().get("senderIcon");
+        deliverToReceiver(privateMessage, receiverOnChatPage, senderIcon);
+
+        // ---- 4. 给发送方回 ACK（带 msgId），前端可据此把消息标记为"发送成功" ----
+        sendAck(session, privateMessage, true);
     }
+
+    // ==================================================================================
+    // 私信投递
+    // ==================================================================================
+
+    /**
+     * 把已落库的消息推送给接收方，并维护未读数
+     * 前提：消息已经 insert 成功，这里任何失败都不影响消息的持久化
+     *
+     * @param senderIcon 发送方头像（取自发送方 session 的连接期缓存）
+     */
+    private void deliverToReceiver(PrivateMessage privateMessage, boolean receiverOnChatPage,
+                                   String senderIcon) throws IOException {
+
+        Long receiveId = privateMessage.getReceiveId();
+        // ---- 在线判断只认本地 session：这是唯一能真正投递消息的凭据，且不可能为脏数据 ----
+        WebSocketSession receiveSession = userSessions.get(receiveId);
+        if (receiveSession == null || !receiveSession.isOpen()) {
+            // 接收方离线：数据库里 status=0 已是未读，再累计未读 hash（供会话列表展示）
+            incrementUnread(receiveId, privateMessage.getUserId());
+            log.info("接收方 {} 不在线，消息 {} 已落库待拉取", receiveId, privateMessage.getId());
+            return;
+        }
+
+        // ---- 接收方在线但不在当前聊天页：累计未读数（不再设置过期时间！旧方案 7 天后未读数会凭空消失）----
+        if (!receiverOnChatPage) {
+            incrementUnread(receiveId, privateMessage.getUserId());
+        }
+
+        // ---- 组装推送 VO（发送方头像直接取自缓存，不再查库）----
+        ObjectMapper objectMapper = SpringContextUtils.getBean(ObjectMapper.class);
+        PrivateMessageVO privateMessageVO = new PrivateMessageVO();
+        privateMessageVO.setNotReadCount(0L); // 接收方在线时前端不依赖该字段，保持兼容
+        privateMessageVO.setContent(privateMessage.getContent());
+        privateMessageVO.setSenderId(privateMessage.getUserId());
+        // 头像必须是发送方的（前端用它渲染对方的头像）
+        privateMessageVO.setIcon(senderIcon);
+        privateMessageVO.setDateTime(privateMessage.getDateTime()
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+
+        String message = objectMapper.writeValueAsString(privateMessageVO);
+        try {
+            // session 已经用 ConcurrentWebSocketSessionDecorator 包装，并发写安全
+            receiveSession.sendMessage(new TextMessage(message));
+            log.info("消息 {} 已投递给接收方 {}", privateMessage.getId(), receiveId);
+        } catch (IOException e) {
+            // 推送失败不影响消息已落库的事实：接收方下次打开会话仍能从 DB 拉到
+            log.error("消息推送失败（消息已落库）, msgId={}, receiver={}", privateMessage.getId(), receiveId, e);
+        }
+    }
+
+    /**
+     * 给发送方回 ACK：{type:"msg_ack", msgId, receiveId, dateTime, success}
+     * 前端当前的消息分发逻辑会安全忽略未知 type，后续可据此实现"发送中/失败/重发"状态
+     */
+    private void sendAck(WebSocketSession senderSession, PrivateMessage privateMessage, boolean success) {
+        try {
+            Map<String, Object> ack = new HashMap<>();
+            ack.put("type", TYPE_MSG_ACK);
+            ack.put("msgId", privateMessage.getId());
+            ack.put("receiveId", privateMessage.getReceiveId());
+            ack.put("dateTime", privateMessage.getDateTime()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            ack.put("success", success);
+            String json = SpringContextUtils.getBean(ObjectMapper.class).writeValueAsString(ack);
+            senderSession.sendMessage(new TextMessage(json));
+        } catch (Exception e) {
+            log.warn("发送 ACK 失败（不影响消息投递）, msgId={}", privateMessage.getId());
+        }
+    }
+
+    // ==================================================================================
+    // 在线状态：心跳租约（TTL 自愈）
+    // ==================================================================================
+
+    /** 连接建立时标记在线：SET user:online:{userId} "1" EX 60 */
+    private void markOnline(Long userId) {
+        stringRedisTemplate.opsForValue().set(ONLINE_KEY_PREFIX + userId, "1",
+                ONLINE_TTL_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /** 心跳续租：只重置 TTL，key 不存在（极端情况）则重建 */
+    private void renewOnlineLease(Long userId) {
+        if (Boolean.TRUE.equals(stringRedisTemplate.hasKey(ONLINE_KEY_PREFIX + userId))) {
+            stringRedisTemplate.expire(ONLINE_KEY_PREFIX + userId, ONLINE_TTL_SECONDS, TimeUnit.SECONDS);
+        } else {
+            markOnline(userId);
+        }
+    }
+
+    /** 判断接收方是否正停留在与发送方的聊天页（旧逻辑保留：current:chat 标记） */
+    private boolean isReceiverOnChatPage(Long receiveId, Long senderId) {
+        return Objects.equals(
+                stringRedisTemplate.opsForValue().get("current:chat:" + receiveId),
+                senderId.toString());
+    }
+
+    /** 接收方未读数 +1（hash 字段：发送者userId -> 未读条数；不设 TTL，已读时由 getChatHistory 删除） */
+    private void incrementUnread(Long receiveId, Long senderId) {
+        String unreadHashKey = "unread:hash:" + receiveId;
+        stringRedisTemplate.opsForHash().increment(unreadHashKey, senderId.toString(), 1L);
+    }
+
+    // ==================================================================================
+    // 会话工具
+    // ==================================================================================
+
+    /**
+     * 用 ConcurrentWebSocketSessionDecorator 包装原始 session：
+     * 同一 session 的 sendMessage 会串行化，避免并发写抛 IllegalStateException；
+     * 发送阻塞超过 2s 或缓冲超 512KB 时自动断开该慢连接，保护容器线程
+     */
+    private WebSocketSession wrapConcurrent(WebSocketSession session) {
+        return new ConcurrentWebSocketSessionDecorator(session, SEND_TIME_LIMIT_MS, SEND_BUFFER_SIZE_LIMIT);
+    }
+
+    /**
+     * 连接建立时缓存发送者头像到 session attributes，
+     * 之后每条消息的 VO 组装直接读取，省去每次 selectById
+     */
+    private void cacheUserInfo(WebSocketSession session, Long userId) {
+        try {
+            User user = SpringContextUtils.getBean(UserMapper.class).selectById(userId);
+            if (user != null) {
+                session.getAttributes().put("senderIcon", user.getIcon());
+            }
+        } catch (Exception e) {
+            log.warn("缓存用户信息失败（不影响连接）, userId={}", userId, e);
+        }
+    }
+
+    // ==================================================================================
+    // 审核结果推送与离线补推（原有逻辑保留）
+    // ==================================================================================
 
     public void pushModerationResult(Long userId, String jsonMsg) {
         WebSocketSession session = userSessions.get(userId);
@@ -223,6 +379,4 @@ public class ForumWebSocketHandler extends TextWebSocketHandler {
         }
         log.info("离线消息补推完成: userId={}, count={}", userId, notifications.size());
     }
-
-
 }

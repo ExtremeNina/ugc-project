@@ -19,4 +19,7 @@ public interface PrivateService {
      * @param lastId 翻页游标：传 null 时返回最新一页；上滑加载更多时传本页最小消息 id
      */
     List<ChatHistoryVO> getChatHistory(Long id, Long lastId);
+
+    // [实时通信升级] 重连后按服务端消息序号增量同步
+    List<ChatHistoryVO> getMessagesAfter(Long id, Long afterId);
 }

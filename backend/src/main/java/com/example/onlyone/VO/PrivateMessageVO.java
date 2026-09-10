@@ -6,10 +6,13 @@ import lombok.Data;
 public class PrivateMessageVO {
 
     private Long senderId;
+    private Long messageId;
+    private String clientMessageId;
     private String icon;
     private String content;
     private String dateTime;
     private Long notReadCount;
+    private Integer deliveryStatus;
 
 
 }

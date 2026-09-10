@@ -45,5 +45,12 @@ public class PrivateController {
         return Result.success(chatHistoryVOS);
     }
 
+    // [实时通信升级] WebSocket 重连后的断点续传：拉取 afterId 之后的消息
+    @GetMapping("/ChatHistory/{id}/sync")
+    public Result syncChatHistory(@PathVariable Long id,
+                                  @RequestParam(value = "afterId", required = false) Long afterId) {
+        return Result.success(privateService.getMessagesAfter(id, afterId));
+    }
+
 
 }

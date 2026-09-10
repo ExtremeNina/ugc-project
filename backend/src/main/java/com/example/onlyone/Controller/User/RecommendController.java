@@ -8,6 +8,7 @@ import com.example.onlyone.Mapper.ArticleMapper;
 import com.example.onlyone.Mapper.UserMapper;
 import com.example.onlyone.Service.RecommendService;
 import com.example.onlyone.VO.RmArticleVO;
+import com.example.onlyone.Utils.SecurityUtils;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -35,10 +36,12 @@ public class RecommendController {
     public Result<Map<String, Object>> recommend(@RequestParam(required = false) Long userId,
                                                 @RequestParam(defaultValue = "0") int offset,
                                                @RequestParam(defaultValue = "20") int limit) {
-        boolean loggedIn = userId != null && userId != 0;
+        Long authenticatedUserId = null;
+        try { authenticatedUserId = SecurityUtils.getCurrentUserId(); } catch (Exception ignored) { }
+        boolean loggedIn = authenticatedUserId != null;
         List<Article> articles;
         if (loggedIn) {
-            articles = recommendService.getFeedList(userId, offset, limit);
+            articles = recommendService.getFeedList(authenticatedUserId, offset, limit);
         } else {
             articles = recommendService.getHotFeed(offset, limit); // 未登录只走热门
         }

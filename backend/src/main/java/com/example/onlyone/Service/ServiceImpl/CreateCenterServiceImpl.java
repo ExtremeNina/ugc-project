@@ -55,6 +55,10 @@ public class CreateCenterServiceImpl implements CreateCenterService {
     @Resource
     private ContentModerationRecordMapper contentModerationRecordMapper;
 
+    // [审核修复 P1] 独立事务保存敏感词拦截审计
+    @Resource
+    private ModerationAuditService moderationAuditService;
+
     // 定义文章点赞类型ID（根据您的实际情况调整）
     //private static final Long ARTICLE_LOVE_TYPE = 1L; // 假设文章点赞类型ID为1
 
@@ -69,24 +73,27 @@ public class CreateCenterServiceImpl implements CreateCenterService {
         try {
             Set<String> hitWords = sensitiveWordEngine.findAllSensitiveWords(articleDTO.getContent());
             if (!hitWords.isEmpty()) {
-                Article article = createOrUpdateArticle(articleDTO, 2L);
+                Article article = createOrUpdateArticle(articleDTO, ContentStatus.REJECTED.value());
                 saveArticleLabels(article.getId(), mergeLabels(articleDTO.getLabel(), articleDTO.getCustomLabels()));
                 ContentModerationRecord record = new ContentModerationRecord();
                 record.setTargetType("article");
                 record.setTargetId(article.getId());
-                record.setStatus("auto_rejected");
-                record.setSensitiveWordsHit(hitWords.toString());
+                record.setStatus(com.example.onlyone.Entity.ModerationRecordStatus.AUTO_REJECTED.value());
+                record.setRevision(nextModerationRevision("article", article.getId()));
+                record.setContentSnapshot(article.getContent());
+                try { record.setSensitiveWordsHit(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(hitWords)); }
+                catch (Exception ex) { throw new IllegalStateException("敏感词序列化失败", ex); }
                 record.setModelReason("命中敏感词: " + hitWords);
                 record.setCreatedAt(LocalDateTime.now());
                 record.setUpdatedAt(LocalDateTime.now());
-                contentModerationRecordMapper.insert(record);
+                moderationAuditService.saveRejectedRecord(record);
 
                 String username = SecurityUtils.getCurrentUsername();
                 log.warn("用户 {} 文章命中敏感词，已拦截: {}", username, hitWords);
                 throw new RuntimeException("内容包含违规词，发布失败");
             }
 
-            Article article = createOrUpdateArticle(articleDTO, 0L);
+            Article article = createOrUpdateArticle(articleDTO, ContentStatus.PENDING.value());
             saveArticleLabels(article.getId(), mergeLabels(articleDTO.getLabel(), articleDTO.getCustomLabels()));
 
             ModerationTask task = new ModerationTask();
@@ -94,6 +101,9 @@ public class CreateCenterServiceImpl implements CreateCenterService {
             task.setTargetId(article.getId());
             task.setContent(articleDTO.getContent());
             task.setUserId(SecurityUtils.getCurrentUserId());
+            // [审核修复 P0] 任务携带提交时版本，消费者只处理该版本。
+            task.setRevision(nextModerationRevision("article", article.getId()));
+            task.setContentSnapshot(article.getContent());
             moderationService.submitTask(task);
 
             String username = SecurityUtils.getCurrentUsername();
@@ -102,6 +112,11 @@ public class CreateCenterServiceImpl implements CreateCenterService {
             log.error("发布文章失败: {}", e.getMessage());
             throw new RuntimeException("发布文章失败，请稍后重试");
         }
+    }
+
+    private int nextModerationRevision(String targetType, Long targetId) {
+        Integer current = contentModerationRecordMapper.selectMaxRevision(targetType, targetId);
+        return (current == null ? 0 : current) + 1;
     }
 
     // 保存草稿

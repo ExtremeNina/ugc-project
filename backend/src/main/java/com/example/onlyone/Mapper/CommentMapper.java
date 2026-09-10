@@ -12,7 +12,7 @@ public interface CommentMapper extends BaseMapper<Comment> {
     @Update("update comment set reply_count = reply_count + #{increment} where id = #{id}")
     void updateReplyCount(Long id , Integer increment);
 
-    @Select("select * from comment where article_id = #{articleId} and status = 3 and (parent_id is null or parent_id = 0) order by create_time asc")
+    @Select("select * from comment where article_id = #{articleId} and status = 1 and (parent_id is null or parent_id = 0) order by create_time asc")
     List<Comment> selectAllComment(Long articleId);
 
     //查看当前评论的全部回复

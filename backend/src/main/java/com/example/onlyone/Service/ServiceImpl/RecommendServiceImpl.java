@@ -234,7 +234,7 @@ public class RecommendServiceImpl implements RecommendService {
 
         // ---- 兜底：候选数不足时降级为纯热门 ----
         if (candidateIds.size() < FALLBACK_LIMIT) {
-            hot.keySet().removeIf(interacted::contains);
+            hot.keySet().removeIf(id -> interacted.contains(id) || displayedSet.contains(id));
             candidateIds = hot.entrySet().stream()
                     .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
                     .limit(props.getCandidatePoolSize())

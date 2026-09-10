@@ -19,4 +19,7 @@ public class SysReviewVO {
     private String content;
     private String authorName;
     private LocalDateTime createdAt;
+    // [审核修复 P1] 审核内容快照
+    private String contentSnapshot;
+    private Integer revision;
 }

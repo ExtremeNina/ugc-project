@@ -26,12 +26,14 @@ public class ContentModerationRecord {
     /** 对应业务表 ID（article.id 或 comment.id） */
     private Long targetId;
 
-    /**
-     * 审核状态
-     * pending / processing / auto_approved / auto_rejected
-     * / human_review / human_approved / human_rejected
-     */
+    /** 同一内容的审核版本号；target_type + target_id + revision 唯一。 */
+    private Integer revision;
+
+    /** [审核修复 P0] 审核状态统一由 ModerationRecordStatus 管理。 */
     private String status;
+
+    /** [审核修复 P1] 提交审核时的内容快照，保证人工审核看到原始版本。 */
+    private String contentSnapshot;
 
     /** 阿里云内容安全返回的置信度（0.00 ~ 1.00） */
     private BigDecimal modelScore;

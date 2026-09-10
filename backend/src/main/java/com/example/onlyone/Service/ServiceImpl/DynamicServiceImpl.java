@@ -2,6 +2,7 @@ package com.example.onlyone.Service.ServiceImpl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.onlyone.Entity.Article;
+import com.example.onlyone.Entity.ContentStatus;
 import com.example.onlyone.Entity.Follow;
 import com.example.onlyone.Entity.User;
 import com.example.onlyone.Mapper.ArticleMapper;
@@ -182,7 +183,7 @@ public class DynamicServiceImpl implements DynamicService {
     private List<Long> getFollowedAuthorIds(Long userId) {
         return followMapper.selectList(new LambdaQueryWrapper<Follow>()
                         .select(Follow::getFollowingId)
-                        .eq(Follow::getFollowingId, userId))
+                        .eq(Follow::getFollowerId, userId))
                 .stream()
                 .map(Follow::getFollowingId)
                 .toList();
@@ -220,7 +221,7 @@ public class DynamicServiceImpl implements DynamicService {
         LambdaQueryWrapper<Article> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.in(Article::getAuthorId, authorIds)              // 作者在关注列表中
                 .ge(Article::getCreateTime, new Date(sevenDaysAgo))   // 7 天内发布
-                .eq(Article::getStatus, 3)                            // 已发布
+                .eq(Article::getStatus, ContentStatus.APPROVED.value()) // 已发布
                 .eq(Article::getIsDraft, 0)                           // 非草稿
                 .orderByDesc(Article::getCreateTime)
                 // 上限保护：回源最多带回收件箱容量条，配合异步回填刚好填满收件箱
@@ -481,6 +482,8 @@ public class DynamicServiceImpl implements DynamicService {
      *  使用 MP 内置的 selectBatchIds，不再需要自定义 BatchArticles SQL */
     private Map<Long, Article> batchGetArticles(List<Long> articleIds) {
         return articleMapper.selectBatchIds(articleIds).stream()
+                .filter(article -> ContentStatus.APPROVED.value().equals(article.getStatus())
+                        && Integer.valueOf(0).equals(article.getIsDraft()))
                 .collect(Collectors.toMap(Article::getId, article -> article, (a, b) -> a));
     }
 

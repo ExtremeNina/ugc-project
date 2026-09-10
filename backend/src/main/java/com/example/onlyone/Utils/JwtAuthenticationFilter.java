@@ -55,6 +55,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 return;
             }
 
+            // Bearer 认证只接受 Access Token，Refresh Token 只能用于刷新接口。
+            if (!"access".equals(jwtProvider.getTokenType(jwt))) {
+                writeJsonResponse(response, 401, "INVALID_TOKEN_TYPE", "仅允许使用 Access Token");
+                return;
+            }
+
             String jti = jwtProvider.getJtiFromToken(jwt);
             if (jti != null && Boolean.TRUE.equals(stringRedisTemplate.hasKey("blacklist:at:" + jti))) {
                 log.info("Token 已在黑名单中");

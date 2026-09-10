@@ -449,6 +449,8 @@ const connectWs = (token: string) => {
   ws.value.onopen = () => {
     console.log("连接成功");
     retryCount = 0; // 重置重试计数
+    // [实时通信升级] 通知聊天窗口：连接恢复后执行 afterId 增量同步
+    imStore.markWsReconnected();
     // 启动心跳：每 30s 发送一次，服务端据此续期在线状态（user:online:{userId} 的 TTL）
     clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(() => {
@@ -478,7 +480,13 @@ const connectWs = (token: string) => {
 
     // 服务端消息回执（msg_ack）：目前仅记录，后续可做"发送中/失败/重发"状态
     if (message.type === "msg_ack") {
-      console.log("消息投递回执", message.msgId, message.success);
+      // [实时通信升级] ACK 驱动 SENDING -> SENT/FAILED 状态迁移
+      imStore.updatePendingMessage(message);
+      return;
+    }
+
+    if (message.type === "message_status") {
+      imStore.setMessageStatus(message);
       return;
     }
 
@@ -547,6 +555,9 @@ const getWsMessage = async () => {
   (window as any).sendWsMessage = (msg: string) => {
     if (ws.value && ws.value.readyState === WebSocket.OPEN) {
       ws.value.send(msg);
+    } else {
+      // [实时通信升级] 未连接时由发送方保留 FAILED 状态，用户可重试
+      try { const data = JSON.parse(msg); if (data.clientMessageId) imStore.updatePendingMessage({ clientMessageId: data.clientMessageId, success: false }); } catch (_) { /* ignore */ }
     }
   };
 

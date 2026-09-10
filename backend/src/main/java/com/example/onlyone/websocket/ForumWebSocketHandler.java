@@ -161,10 +161,44 @@ public class ForumWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        // [实时通信升级] 接收方明确确认已读，按消息水位更新，避免仅依赖页面状态推测
+        if (Objects.equals(privateDTO.getType(), "read_ack")) {
+            if (privateDTO.getReceiveId() == null || privateDTO.getMaxReadMessageId() == null) return;
+            privateMessageMapperForAck().update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<PrivateMessage>()
+                    .eq(PrivateMessage::getUserId, privateDTO.getReceiveId())
+                    .eq(PrivateMessage::getReceiveId, userId)
+                    .le(PrivateMessage::getId, privateDTO.getMaxReadMessageId())
+                    .eq(PrivateMessage::getStatus, 0L)
+                    .set(PrivateMessage::getStatus, 1L)
+                    .set(PrivateMessage::getDeliveryStatus, 2));
+            stringRedisTemplate.opsForHash().delete("unread:hash:" + userId, privateDTO.getReceiveId().toString());
+            notifySenderMessageStatus(privateDTO.getReceiveId(), privateDTO.getMaxReadMessageId(), "read");
+            return;
+        }
+
+        // [实时通信升级] 接收方 ACK：只有消息确实写入客户端后才标记已送达
+        if (Objects.equals(privateDTO.getType(), "delivery_ack")) {
+            if (privateDTO.getMessageId() == null) return;
+            PrivateMessage delivered = privateMessageMapperForAck().selectById(privateDTO.getMessageId());
+            if (delivered != null && Objects.equals(delivered.getReceiveId(), userId)) {
+                delivered.setDeliveryStatus(Math.max(1, delivered.getDeliveryStatus() == null ? 0 : delivered.getDeliveryStatus()));
+                privateMessageMapperForAck().updateById(delivered);
+                notifySenderMessageStatus(delivered.getUserId(), delivered.getId(), "delivered");
+            }
+            return;
+        }
+
         // 基础校验：必须有接收人和内容
         if (privateDTO.getReceiveId() == null || privateDTO.getContent() == null
-                || privateDTO.getContent().isBlank()) {
+                || privateDTO.getContent().isBlank() || privateDTO.getContent().length() > 255
+                || Objects.equals(privateDTO.getReceiveId(), userId)) {
             log.warn("非法的私信消息（缺少接收人或内容），已丢弃, userId={}", userId);
+            return;
+        }
+        // [实时通信升级] 不信任客户端携带的任何用户资料，只以用户表中的有效接收者为准
+        User receiver = SpringContextUtils.getBean(UserMapper.class).selectById(privateDTO.getReceiveId());
+        if (receiver == null || receiver.getStatus() != 1) {
+            sendProtocolError(session, privateDTO.getClientMessageId(), "receiver unavailable");
             return;
         }
 
@@ -174,28 +208,38 @@ public class ForumWebSocketHandler extends TextWebSocketHandler {
         privateMessage.setContent(privateDTO.getContent());
         privateMessage.setDateTime(LocalDateTime.now());
         privateMessage.setReceiveId(privateDTO.getReceiveId());
-        // 接收方正在当前聊天页 => 直接置为已读，否则为未读
-        boolean receiverOnChatPage = isReceiverOnChatPage(privateDTO.getReceiveId(), userId);
-        privateMessage.setStatus(receiverOnChatPage ? 1L : 0L);
+        privateMessage.setClientMessageId(privateDTO.getClientMessageId());
+        privateMessage.setDeliveryStatus(0);
+        // [实时通信升级] 初始统一未读；是否已读仅由接收方明确的 read_ack 决定。
+        privateMessage.setStatus(0L);
 
         // ---- 2. 落库（insert 后 MyBatis-Plus 会回填自增 id）----
         // 落库失败直接抛异常结束：此时谁也没收到消息，发送方前端可提示重发，不会出现"单边可见"
         PrivateMessageMapper privateMessageMapper = SpringContextUtils.getBean(PrivateMessageMapper.class);
         try {
+            if (privateDTO.getClientMessageId() == null || privateDTO.getClientMessageId().isBlank()) {
+                sendAck(session, privateMessage, false, "clientMessageId required");
+                return;
+            }
+            PrivateMessage existing = privateMessageMapper.selectByClientMessageId(userId, privateDTO.getClientMessageId());
+            if (existing != null) {
+                sendAck(session, existing, true, null);
+                return;
+            }
             privateMessageMapper.insert(privateMessage);
         } catch (Exception e) {
             log.error("私信落库失败，消息未投递, sender={}, receiver={}", userId, privateDTO.getReceiveId(), e);
-            sendAck(session, privateMessage, false);
+            sendAck(session, privateMessage, false, "persist failed");
             return;
         }
 
         // ---- 3. 落库成功后再投递 + 接收方未读数累计 ----
         // 发送方头像从发送方自己的 session attributes 取（连接时已缓存），避免每条消息查库
         String senderIcon = (String) session.getAttributes().get("senderIcon");
-        deliverToReceiver(privateMessage, receiverOnChatPage, senderIcon);
+        deliverToReceiver(privateMessage, isReceiverOnChatPage(privateDTO.getReceiveId(), userId), senderIcon);
 
         // ---- 4. 给发送方回 ACK（带 msgId），前端可据此把消息标记为"发送成功" ----
-        sendAck(session, privateMessage, true);
+        sendAck(session, privateMessage, true, null);
     }
 
     // ==================================================================================
@@ -231,9 +275,12 @@ public class ForumWebSocketHandler extends TextWebSocketHandler {
         PrivateMessageVO privateMessageVO = new PrivateMessageVO();
         privateMessageVO.setNotReadCount(0L); // 接收方在线时前端不依赖该字段，保持兼容
         privateMessageVO.setContent(privateMessage.getContent());
+        privateMessageVO.setMessageId(privateMessage.getId());
+        privateMessageVO.setClientMessageId(privateMessage.getClientMessageId());
         privateMessageVO.setSenderId(privateMessage.getUserId());
         // 头像必须是发送方的（前端用它渲染对方的头像）
         privateMessageVO.setIcon(senderIcon);
+        privateMessageVO.setDeliveryStatus(0);
         privateMessageVO.setDateTime(privateMessage.getDateTime()
                 .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
 
@@ -252,19 +299,52 @@ public class ForumWebSocketHandler extends TextWebSocketHandler {
      * 给发送方回 ACK：{type:"msg_ack", msgId, receiveId, dateTime, success}
      * 前端当前的消息分发逻辑会安全忽略未知 type，后续可据此实现"发送中/失败/重发"状态
      */
-    private void sendAck(WebSocketSession senderSession, PrivateMessage privateMessage, boolean success) {
+    private void sendAck(WebSocketSession senderSession, PrivateMessage privateMessage, boolean success, String error) {
         try {
             Map<String, Object> ack = new HashMap<>();
             ack.put("type", TYPE_MSG_ACK);
             ack.put("msgId", privateMessage.getId());
+            ack.put("messageId", privateMessage.getId());
+            ack.put("clientMessageId", privateMessage.getClientMessageId());
             ack.put("receiveId", privateMessage.getReceiveId());
             ack.put("dateTime", privateMessage.getDateTime()
                     .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
             ack.put("success", success);
+            ack.put("error", error);
             String json = SpringContextUtils.getBean(ObjectMapper.class).writeValueAsString(ack);
             senderSession.sendMessage(new TextMessage(json));
         } catch (Exception e) {
             log.warn("发送 ACK 失败（不影响消息投递）, msgId={}", privateMessage.getId());
+        }
+    }
+
+    // [实时通信升级] WebSocket 回调中通过 SpringContext 获取 Mapper，避免引入 IO 事务
+    private PrivateMessageMapper privateMessageMapperForAck() {
+        return SpringContextUtils.getBean(PrivateMessageMapper.class);
+    }
+
+    // [实时通信升级] 已送达/已读状态变化推送给发送方，发送方 UI 无需轮询数据库
+    private void notifySenderMessageStatus(Long senderId, Long messageId, String status) {
+        WebSocketSession sender = userSessions.get(senderId);
+        if (sender == null || !sender.isOpen()) return;
+        try {
+            sender.sendMessage(new TextMessage(SpringContextUtils.getBean(ObjectMapper.class).writeValueAsString(Map.of(
+                    "type", "message_status", "messageId", messageId, "status", status))));
+        } catch (IOException e) {
+            log.debug("消息状态推送失败，用户下次拉取历史可恢复, senderId={}, messageId={}", senderId, messageId);
+        }
+    }
+
+    private void sendProtocolError(WebSocketSession session, String clientMessageId, String error) {
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("type", "msg_ack");
+            payload.put("clientMessageId", clientMessageId);
+            payload.put("success", false);
+            payload.put("error", error);
+            session.sendMessage(new TextMessage(SpringContextUtils.getBean(ObjectMapper.class).writeValueAsString(payload)));
+        } catch (IOException ignored) {
+            // 连接关闭时无需额外处理
         }
     }
 
@@ -370,6 +450,8 @@ public class ForumWebSocketHandler extends TextWebSocketHandler {
                 WebSocketSession session = userSessions.get(userId);
                 if (session != null && session.isOpen()) {
                     session.sendMessage(new TextMessage(notification.getMessageContent()));
+                } else {
+                    continue;
                 }
                 notification.setIsSent(1);
                 mapper.updateById(notification);

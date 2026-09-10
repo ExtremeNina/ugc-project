@@ -4,6 +4,8 @@ import com.example.onlyone.Entity.Article;
 import com.example.onlyone.Entity.Comment;
 import com.example.onlyone.Entity.ContentModerationRecord;
 import com.example.onlyone.Entity.User;
+import com.example.onlyone.Entity.ContentStatus;
+import com.example.onlyone.Entity.ModerationRecordStatus;
 import com.example.onlyone.Mapper.ArticleMapper;
 import com.example.onlyone.Mapper.CommentMapper;
 import com.example.onlyone.Mapper.ContentModerationRecordMapper;
@@ -50,7 +52,7 @@ public class SysReviewServiceImpl implements SysReviewService {
     @Override
     public List<SysReviewVO> getPendingList(int page, int size, String type) {
         int offset = (page - 1) * size;
-        List<ContentModerationRecord> records = contentModerationRecordMapper.selectByStatusAndType("human_review", type, offset, size);
+        List<ContentModerationRecord> records = contentModerationRecordMapper.selectByStatusAndType(ModerationRecordStatus.HUMAN_REVIEW.value(), type, offset, size);
 
         List<SysReviewVO> result = new ArrayList<>();
         for (ContentModerationRecord record : records) {
@@ -64,18 +66,20 @@ public class SysReviewServiceImpl implements SysReviewService {
             vo.setModelReason(record.getModelReason());
             vo.setSensitiveWordsHit(record.getSensitiveWordsHit());
             vo.setCreatedAt(record.getCreatedAt());
+            vo.setContentSnapshot(record.getContentSnapshot());
+            vo.setRevision(record.getRevision());
 
             if ("article".equals(record.getTargetType())) {
                 Article article = articleMapper.selectById(record.getTargetId());
                 if (article != null) {
-                    vo.setContent(article.getContent());
+                    vo.setContent(record.getContentSnapshot() != null ? record.getContentSnapshot() : article.getContent());
                     User author = userMapper.selectById(article.getAuthorId());
                     vo.setAuthorName(author != null ? author.getUsername() : "未知");
                 }
             } else if ("comment".equals(record.getTargetType())) {
                 Comment comment = commentMapper.selectById(record.getTargetId());
                 if (comment != null) {
-                    vo.setContent(comment.getContent());
+                    vo.setContent(record.getContentSnapshot() != null ? record.getContentSnapshot() : comment.getContent());
                     User author = userMapper.selectById(comment.getUserId());
                     vo.setAuthorName(author != null ? author.getUsername() : "未知");
                 }
@@ -93,14 +97,11 @@ public class SysReviewServiceImpl implements SysReviewService {
         if (record == null) {
             throw new RuntimeException("审核记录不存在");
         }
-
-        record.setHumanDecision("approved");
-        record.setHumanComment(remark);
-        record.setStatus("human_approved");
-        record.setUpdatedAt(LocalDateTime.now());
-        contentModerationRecordMapper.updateById(record);
-
-        updateBusinessStatus(record.getTargetType(), record.getTargetId(), 1L);
+        Long reviewer = com.example.onlyone.Utils.SecurityUtils.getCurrentUserId();
+        if (contentModerationRecordMapper.updateHumanDecision(recordId, "approved", reviewer, remark, ModerationRecordStatus.HUMAN_APPROVED.value()) != 1)
+            throw new IllegalStateException("审核记录已被其他管理员处理");
+        updateBusinessStatus(record.getTargetType(), record.getTargetId(), ContentStatus.APPROVED.value());
+        record.setStatus(ModerationRecordStatus.HUMAN_APPROVED.value()); record.setHumanDecision("approved"); record.setReviewedBy(reviewer); record.setHumanComment(remark);
         sendResultNotification(record, "approved", remark);
 
         log.info("人工审核通过: recordId={}", recordId);
@@ -114,13 +115,11 @@ public class SysReviewServiceImpl implements SysReviewService {
             throw new RuntimeException("审核记录不存在");
         }
 
-        record.setHumanDecision("rejected");
-        record.setHumanComment(remark);
-        record.setStatus("human_rejected");
-        record.setUpdatedAt(LocalDateTime.now());
-        contentModerationRecordMapper.updateById(record);
-
-        updateBusinessStatus(record.getTargetType(), record.getTargetId(), 2L);
+        Long reviewer = com.example.onlyone.Utils.SecurityUtils.getCurrentUserId();
+        if (contentModerationRecordMapper.updateHumanDecision(recordId, "rejected", reviewer, remark, ModerationRecordStatus.HUMAN_REJECTED.value()) != 1)
+            throw new IllegalStateException("审核记录已被其他管理员处理");
+        updateBusinessStatus(record.getTargetType(), record.getTargetId(), ContentStatus.REJECTED.value());
+        record.setStatus(ModerationRecordStatus.HUMAN_REJECTED.value()); record.setHumanDecision("rejected"); record.setReviewedBy(reviewer); record.setHumanComment(remark);
         sendResultNotification(record, "rejected", remark);
 
         log.info("人工审核拦截: recordId={}", recordId);
@@ -131,12 +130,14 @@ public class SysReviewServiceImpl implements SysReviewService {
             Article article = new Article();
             article.setId(targetId);
             article.setStatus(status);
-            articleMapper.updateById(article);
+            if (articleMapper.updateById(article) != 1) throw new IllegalStateException("文章不存在或已删除");
         } else if ("comment".equals(targetType)) {
             Comment comment = new Comment();
             comment.setId(targetId);
             comment.setStatus(status);
-            commentMapper.updateById(comment);
+            if (commentMapper.updateById(comment) != 1) throw new IllegalStateException("评论不存在或已删除");
+        } else {
+            throw new IllegalArgumentException("不支持的审核目标类型");
         }
     }
 
@@ -159,6 +160,8 @@ public class SysReviewServiceImpl implements SysReviewService {
             forumWebSocketHandler.pushModerationResult(userId, jsonMsg);
         } catch (Exception e) {
             log.error("发送人工审核结果通知失败: recordId={}", record.getId(), e);
+            // [审核修复 P1] 通知失败必须暴露给调用方，避免审核结果不可感知。
+            throw new IllegalStateException("人工审核结果通知失败", e);
         }
     }
 

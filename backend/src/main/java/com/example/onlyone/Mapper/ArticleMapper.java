@@ -66,7 +66,7 @@ public interface ArticleMapper extends BaseMapper<Article> {
      * 用于 Feed 流推拉结合——大V的文章不推入收件箱，用户读 Feed 时按关注的大V现查
      */
     @Select("<script>" +
-            "select * from article where status = 3 and is_draft = 0 and create_time &gt;= #{since} " +
+            "select * from article where status = 1 and is_draft = 0 and create_time &gt;= #{since} " +
             "and author_id in " +
             "<foreach collection='authorIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> " +
             "order by create_time desc limit #{limit}" +

@@ -6,6 +6,7 @@ import com.example.onlyone.VO.CommentVO;
 import com.example.onlyone.VO.UserProfileVO;
 import com.example.onlyone.Entity.Comment;
 import com.example.onlyone.Entity.ContentModerationRecord;
+import com.example.onlyone.Entity.ContentStatus;
 import com.example.onlyone.Entity.User;
 import com.example.onlyone.Mapper.CommentMapper;
 import com.example.onlyone.Mapper.ContentModerationRecordMapper;
@@ -70,6 +71,10 @@ public class CommentServiceImpl implements CommentService {
     @Resource
     private ContentModerationRecordMapper contentModerationRecordMapper;
 
+    // [审核修复 P1] 独立事务保存敏感词拦截审计
+    @Resource
+    private ModerationAuditService moderationAuditService;
+
     @Override
     public UserProfileVO getUserProfile() {
         Long userId = SecurityUtils.getCurrentUserId();
@@ -112,7 +117,7 @@ public class CommentServiceImpl implements CommentService {
 
         Set<String> hitWords = sensitiveWordEngine.findAllSensitiveWords(commentDTO.getContent());
         if (!hitWords.isEmpty()) {
-            comment.setStatus(2L);
+            comment.setStatus(ContentStatus.REJECTED.value());
             comment.setLove(0L);
             comment.setReplyCount(0L);
             comment.setArticleId(commentDTO.getArticleId());
@@ -140,18 +145,21 @@ public class CommentServiceImpl implements CommentService {
             ContentModerationRecord record = new ContentModerationRecord();
             record.setTargetType("comment");
             record.setTargetId(comment.getId());
-            record.setStatus("auto_rejected");
-            record.setSensitiveWordsHit(hitWords.toString());
+            record.setStatus(com.example.onlyone.Entity.ModerationRecordStatus.AUTO_REJECTED.value());
+            record.setRevision(1);
+            record.setContentSnapshot(comment.getContent());
+            try { record.setSensitiveWordsHit(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(hitWords)); }
+            catch (Exception ex) { throw new IllegalStateException("敏感词序列化失败", ex); }
             record.setModelReason("命中敏感词: " + hitWords);
             record.setCreatedAt(LocalDateTime.now());
             record.setUpdatedAt(LocalDateTime.now());
-            contentModerationRecordMapper.insert(record);
+            moderationAuditService.saveRejectedRecord(record);
 
             log.warn("用户 {} 评论命中敏感词，已拦截: {}", user.getUsername(), hitWords);
             throw new RuntimeException("内容包含违规词，评论失败");
         }
 
-        comment.setStatus(0L);
+        comment.setStatus(ContentStatus.PENDING.value());
         comment.setLove(0L);
         comment.setReplyCount(0L);
         comment.setArticleId(commentDTO.getArticleId());
@@ -190,6 +198,9 @@ public class CommentServiceImpl implements CommentService {
         task.setTargetId(comment.getId());
         task.setContent(comment.getContent());
         task.setUserId(user.getId());
+        // [审核修复 P0] 任务绑定内容版本和快照。
+        task.setRevision(1);
+        task.setContentSnapshot(comment.getContent());
         moderationService.submitTask(task);
 
         commentVO.setCreateTime(comment.getCreateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));

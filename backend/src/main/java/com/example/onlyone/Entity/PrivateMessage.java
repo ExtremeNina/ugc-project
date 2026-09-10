@@ -11,6 +11,8 @@ public class PrivateMessage {
 
     @TableId(type = IdType.AUTO)
     private Long id;
+    // [实时通信升级] 客户端消息唯一号，配合发送者实现幂等
+    private String clientMessageId;
     private Long userId;
     private Long receiveId;
     private String content;
@@ -18,5 +20,7 @@ public class PrivateMessage {
     private LocalDateTime dateTime;
     //0为未读1为已读
     private Long status;
+    // [实时通信升级] 投递状态：0持久化，1已送达，2已读；status 仍仅表示接收方已读
+    private Integer deliveryStatus;
 
 }

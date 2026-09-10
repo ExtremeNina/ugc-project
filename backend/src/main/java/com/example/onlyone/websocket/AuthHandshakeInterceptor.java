@@ -38,7 +38,9 @@ public class AuthHandshakeInterceptor implements HandshakeInterceptor {
 
                     JwtProvider jwtProvider = SpringContextUtils.getBean(JwtProvider.class);
 
-                    if (jwtProvider.validateToken(token)) {
+                    if (jwtProvider.validateToken(token)
+                            && "access".equals(jwtProvider.getTokenType(token))
+                            && jwtProvider.getJtiFromToken(token) != null) {
                         String username = jwtProvider.getUsernameFromToken(token);
 
                         Long userId = jwtProvider.getUserIdFromToken(token);

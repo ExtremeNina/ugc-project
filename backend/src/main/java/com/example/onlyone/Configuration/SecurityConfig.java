@@ -61,6 +61,7 @@ public class SecurityConfig {
                                 "/api/auth/**",
                                 "/ws",
                                 "/api/community/Recommend",
+                                "/api/Recommend/feed",
                                 "/api/community/isLogin",
                                 "user/api/Interaction/is-liked",
                                 "user/api/Interaction/count",
@@ -72,6 +73,8 @@ public class SecurityConfig {
                                 "/api/users/me").permitAll()
                         .requestMatchers("/api/dynamic/**").hasRole("USER")
                         .requestMatchers("/api/admin/**").hasAnyRole("ADMIN", "SUPER_ADMIN")
+                        // [审核修复 P0] 人工审核接口只允许管理员访问
+                        .requestMatchers("/sys/review/**").hasAnyRole("ADMIN", "SUPER_ADMIN")
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2
                         .successHandler(oAuth2SuccessHandler())

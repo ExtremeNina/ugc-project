@@ -178,7 +178,7 @@ public class ArticleDataConverterUtils {
         Long loveCount = 0L;
         Long viewCount = 0L;
 
-        if (article.getStatus() == 3) { // 已发布的文章
+        if (article.getStatus() == 1) { // 已发布的文章
             loveCount = Long.valueOf(loveService.getEntityLoveCount(article.getId(), ARTICLE_LOVE_TYPE));
             viewCount = (long) article.getPageview();
         }

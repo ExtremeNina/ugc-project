@@ -37,7 +37,7 @@
             <div v-else class="message-self">
               <div class="msg-body">
                 <div class="msg-content">{{ item.content }}</div>
-                <span class="msg-time">{{ item.time }}</span>
+                <span class="msg-time">{{ item.time }}{{ item.status ? ` · ${item.status}` : item.deliveryStatus === 2 ? " · 已读" : item.deliveryStatus === 1 ? " · 已送达" : "" }}</span>
               </div>
               <el-avatar :src="myIcon" :size="36" class="msg-avatar" />
             </div>
@@ -67,7 +67,7 @@
 <script lang="ts" setup>
 import { ref, watch, nextTick, onUnmounted } from "vue";
 import { DArrowRight } from "@element-plus/icons-vue";
-import { getPrivateChatHistory } from "@/api/im";
+import { getPrivateChatHistory, syncPrivateChatHistory } from "@/api/im";
 import { useUserStore } from "@/store/userStore";
 import { useImStore } from "@/store/imStore";
 
@@ -89,6 +89,8 @@ const userStore = useUserStore();
 const imStore = useImStore();
 const visible = ref(props.modelValue);
 const chatList = ref<Array<any>>([]);
+const maxMessageId = ref(0);
+const retryTimers = new Map<string, any>();
 const inputText = ref("");
 const chatBodyRef = ref<HTMLElement | null>(null);
 
@@ -114,26 +116,66 @@ watch(() => imStore.privateMessage, (msg: any) => {
   if (!msg) return;
   const friendId = props.friend.userId;
   if (msg.senderId === Number(friendId) || msg.senderId === Number(currentUserId)) {
-    const exists = chatList.value.some(item => 
-      item.content === msg.content && item.time === msg.dateTime
-    );
+    const exists = chatList.value.some(item => item.id === msg.messageId || (msg.clientMessageId && item.clientMessageId === msg.clientMessageId));
     if (!exists) {
       chatList.value.push({
+        id: msg.messageId, clientMessageId: msg.clientMessageId,
         isOwn: msg.senderId === Number(currentUserId),
         content: msg.content,
         time: msg.dateTime,
       });
+      if (msg.messageId) maxMessageId.value = Math.max(maxMessageId.value, msg.messageId);
+      // [实时通信升级] 接收方确认已收到，服务端据此记录 DELIVERED
+      emit("sendWsMessage", JSON.stringify({ type: "delivery_ack", messageId: msg.messageId }));
       scrollToBottom();
     }
   }
+});
+
+// [实时通信升级] WebSocket 恢复后按 afterId 补齐断线期间消息
+watch(() => imStore.wsReconnectVersion, () => {
+  if (!visible.value || !props.friend.userId) return;
+  syncPrivateChatHistory(props.friend.userId, maxMessageId.value).then(res => {
+    (res.data || []).forEach((item: any) => {
+      if (!chatList.value.some(old => old.id === item.id)) chatList.value.push({ ...item, time: item.time });
+      if (item.id) maxMessageId.value = Math.max(maxMessageId.value, item.id);
+    });
+    chatList.value.sort((a, b) => (a.id || 0) - (b.id || 0));
+  });
+});
+
+// [实时通信升级] 将全局 ACK 与送达/已读事件映射到当前会话的 UI 状态。
+watch(() => imStore.pendingMessages, () => {
+  chatList.value.forEach(item => {
+    if (item.clientMessageId && imStore.pendingMessages[item.clientMessageId]) {
+      const pending = imStore.pendingMessages[item.clientMessageId];
+      item.status = pending.status;
+      item.id = pending.messageId || item.id;
+      if (item.id) maxMessageId.value = Math.max(maxMessageId.value, item.id);
+    }
+  });
+}, { deep: true });
+
+watch(() => imStore.messageStatus, (status: any) => {
+  if (!status) return;
+  const item = chatList.value.find(message => message.id === status.messageId);
+  if (item) { item.deliveryStatus = status.status === "read" ? 2 : 1; item.status = ""; }
 });
 
 const fetchHistory = () => {
   if (!props.friend.userId) return;
   getPrivateChatHistory(props.friend.userId).then((res) => {
     chatList.value = res.data || [];
+    maxMessageId.value = chatList.value.reduce((m, x) => Math.max(m, x.id || 0), 0);
+    sendReadAck();
     scrollToBottom();
   });
+};
+
+const sendReadAck = () => {
+  if (maxMessageId.value > 0) {
+    emit("sendWsMessage", JSON.stringify({ type: "read_ack", receiveId: Number(props.friend.userId), maxReadMessageId: maxMessageId.value }));
+  }
 };
 
 const sendMessage = () => {
@@ -141,6 +183,8 @@ const sendMessage = () => {
   if (!text) return;
   const message = {
     type: "text",
+    // [实时通信升级] 重试必须复用该 ID，服务端以此保证幂等
+    clientMessageId: crypto.randomUUID(),
     receiveId: Number(props.friend.userId),
     receiveName: props.friend.username,
     senderId: Number(currentUserId),
@@ -148,11 +192,22 @@ const sendMessage = () => {
     content: text,
   };
   emit("sendWsMessage", JSON.stringify(message));
+  imStore.trackPendingMessage({ ...message, status: "SENDING" });
   chatList.value.push({
+    clientMessageId: message.clientMessageId, status: "SENDING",
     isOwn: true,
     content: text,
     time: "刚刚",
   });
+  const retry = (attempt = 0) => {
+    const pending = imStore.pendingMessages[message.clientMessageId];
+    if (!pending || pending.status !== "SENDING") return;
+    if (attempt >= 3) { imStore.updatePendingMessage({ clientMessageId: message.clientMessageId, success: false }); return; }
+    retryTimers.set(message.clientMessageId, setTimeout(() => {
+      emit("sendWsMessage", JSON.stringify(message)); retry(attempt + 1);
+    }, 5000));
+  };
+  retry();
   inputText.value = "";
   scrollToBottom();
 };

@@ -156,14 +156,7 @@ public class PrivateServiceImpl implements PrivateService {
             return List.of();
         }
 
-        //标记所有聊天记录为已读（打开聊天页即视为已读，同时清掉未读 hash 字段）
-        //MP lambda 更新：替代手写 @Update，条件与赋值都用方法引用，避免字符串列名拼错
-        privateMessageMapper.update(null, new LambdaUpdateWrapper<PrivateMessage>()
-                .eq(PrivateMessage::getReceiveId, userId)
-                .eq(PrivateMessage::getUserId, id)
-                .eq(PrivateMessage::getStatus, 0L)
-                .set(PrivateMessage::getStatus, 1L));
-        stringRedisTemplate.opsForHash().delete(UNREAD_HASH_PREFIX + userId, id.toString());
+        // [实时通信升级] 查询历史不再隐式标记已读；客户端渲染成功后发送 read_ack。
 
         // ---- 游标分页：lastId 为 null 取最新一页，翻历史时传上一页最小 id ----
         // MP lambda 查询 + last 限页：不用 Page 分页插件是为了省掉多余的 count 查询
@@ -184,6 +177,8 @@ public class PrivateServiceImpl implements PrivateService {
 
             ChatHistoryVO chatHistoryVO = new ChatHistoryVO();
             chatHistoryVO.setId(privateMessage.getId());
+            chatHistoryVO.setClientMessageId(privateMessage.getClientMessageId());
+            chatHistoryVO.setDeliveryStatus(privateMessage.getDeliveryStatus());
             chatHistoryVO.setTime(privateMessage.getDateTime()
                     .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
             chatHistoryVO.setContent(privateMessage.getContent());
@@ -196,7 +191,7 @@ public class PrivateServiceImpl implements PrivateService {
             } else {
                 chatHistoryVO.setSenderId(id);
                 chatHistoryVO.setReceiverId(userId);
-                chatHistoryVO.setIsOwn(false);
+            chatHistoryVO.setIsOwn(false);
                 chatHistoryVOList.add(chatHistoryVO);
             }
         }
@@ -208,5 +203,32 @@ public class PrivateServiceImpl implements PrivateService {
         // 注意：不再整包打印聊天内容（隐私 + 日志膨胀），只打条数
         log.info("返回用户 {} 与 {} 的聊天记录 {} 条, lastId={}", userId, id, chatHistoryVOList.size(), lastId);
         return chatHistoryVOList;
+    }
+
+    @Override
+    public List<ChatHistoryVO> getMessagesAfter(Long id, Long afterId) {
+        Long userId = SecurityUtils.getCurrentUserId();
+        if (userId == null || id == null) return List.of();
+        long cursor = afterId == null ? 0L : afterId;
+        List<PrivateMessage> messages = privateMessageMapper.selectList(new LambdaQueryWrapper<PrivateMessage>()
+                .and(w -> w.eq(PrivateMessage::getUserId, userId).eq(PrivateMessage::getReceiveId, id)
+                        .or(x -> x.eq(PrivateMessage::getUserId, id).eq(PrivateMessage::getReceiveId, userId)))
+                .gt(PrivateMessage::getId, cursor)
+                .orderByAsc(PrivateMessage::getId)
+                .last("LIMIT " + PAGE_SIZE));
+        List<ChatHistoryVO> result = new ArrayList<>();
+        for (PrivateMessage pm : messages) {
+            ChatHistoryVO vo = new ChatHistoryVO();
+            vo.setId(pm.getId());
+            vo.setClientMessageId(pm.getClientMessageId());
+            vo.setSenderId(pm.getUserId());
+            vo.setReceiverId(pm.getReceiveId());
+            vo.setContent(pm.getContent());
+            vo.setTime(pm.getDateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            vo.setIsOwn(pm.getUserId().equals(userId));
+            vo.setDeliveryStatus(pm.getDeliveryStatus());
+            result.add(vo);
+        }
+        return result;
     }
 }

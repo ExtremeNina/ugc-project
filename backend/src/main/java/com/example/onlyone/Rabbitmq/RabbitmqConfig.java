@@ -95,7 +95,11 @@ public class RabbitmqConfig {
 
     @Bean
     public Queue moderationRequestQueue() {
-        return new Queue("moderation.request.queue", true);
+        // [审核修复 P0] 审核失败消息进入专用 DLQ，避免 basicNack(requeue=false) 直接丢失。
+        Map<String, Object> args = new HashMap<>();
+        args.put("x-dead-letter-exchange", "moderation.dlx.exchange");
+        args.put("x-dead-letter-routing-key", "moderation.dlx.routing");
+        return new Queue("moderation.request.queue", true, false, false, args);
     }
 
     @Bean
@@ -113,6 +117,22 @@ public class RabbitmqConfig {
     public Binding moderationResultBinding() {
         return BindingBuilder.bind(moderationResultQueue())
                 .to(moderationExchange()).with("moderation.result");
+    }
+
+    // [审核修复 P0] 审核请求专用死信交换器、队列和绑定。
+    @Bean
+    public DirectExchange moderationDlxExchange() {
+        return new DirectExchange("moderation.dlx.exchange", true, false);
+    }
+
+    @Bean
+    public Queue moderationDlxQueue() {
+        return QueueBuilder.durable("moderation.dlq").build();
+    }
+
+    @Bean
+    public Binding moderationDlxBinding() {
+        return BindingBuilder.bind(moderationDlxQueue()).to(moderationDlxExchange()).with("moderation.dlx.routing");
     }
 
 
